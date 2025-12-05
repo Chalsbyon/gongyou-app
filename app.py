@@ -8,19 +8,19 @@ import io
 import os
 import json
 
+# --- 1. 초기 설정 (가장 먼저 실행) ---
+st.set_page_config(page_title="Gongyou Drive", page_icon="☁️", layout="wide")
+
 # ==========================================
 # [설정] 사용자 정보
 # ==========================================
-# 공유한 구글 드라이브 폴더의 ID (브라우저 주소창의 folders/ 뒷부분)
+# 공유한 구글 드라이브 폴더의 ID
 TARGET_FOLDER_ID = "1yp5QvbHIkvSO0OqmwhPW2bsF63ebpU-q"
 SERVICE_ACCOUNT_FILE = 'gong_key.json' 
 # ==========================================
 
-# --- 1. 초기 설정 및 인증 ---
-st.set_page_config(page_title="Gongyou Drive", page_icon="☁️", layout="wide")
-
+# 세션 상태 초기화
 if 'pin' not in st.session_state:
-    # Secrets에 'admin_password'가 있으면 그걸 쓰고, 없으면 0000
     if "admin_password" in st.secrets:
         st.session_state.pin = st.secrets["admin_password"]
     else:
@@ -35,42 +35,51 @@ def get_drive_service():
     creds = None
     bot_email = "알 수 없음"
     
-    # 읽기 전용 권한 (안전함)
+    # 읽기 전용 권한
     SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 
-    # 1. 로컬 환경: 파일이 있는지 확인
+    # 1. 로컬 파일 확인 (개발 환경)
     if os.path.exists(SERVICE_ACCOUNT_FILE):
         try:
             creds = service_account.Credentials.from_service_account_file(
                 SERVICE_ACCOUNT_FILE, scopes=SCOPES)
             bot_email = creds.service_account_email
         except Exception as e:
-            return None, None, f"로컬 인증 파일 오류: {e}"
+            return None, None, f"로컬 키 파일 로드 실패: {e}"
             
-    # 2. 클라우드 환경: Streamlit Secrets 확인
+    # 2. Streamlit Cloud Secrets 확인 (배포 환경)
     elif "gcp_service_account" in st.secrets:
         try:
+            # Secrets 정보를 딕셔너리로 변환
             key_dict = dict(st.secrets["gcp_service_account"])
+            
+            # [중요] private_key의 줄바꿈 문자(\n) 처리 보정
+            if "private_key" in key_dict:
+                key_dict["private_key"] = key_dict["private_key"].replace("\\n", "\n")
+
             creds = service_account.Credentials.from_service_account_info(
                 key_dict, scopes=SCOPES)
             bot_email = key_dict.get('client_email', '알 수 없음')
         except Exception as e:
-            return None, None, f"Secrets 인증 오류: {e}"
+            return None, None, f"Secrets 키 형식 오류: {e}"
     
     else:
-        return None, None, "인증 키를 찾을 수 없습니다. (Secrets 설정 필요)"
+        return None, None, "인증 키를 찾을 수 없습니다. (Secrets의 [gcp_service_account] 설정을 확인하세요)"
 
     try:
         service = build('drive', 'v3', credentials=creds)
         return service, bot_email, None
     except Exception as e:
-        return None, None, f"서비스 연결 오류: {e}"
+        return None, None, f"API 연결 실패: {e}"
 
 # --- 2. 구글 드라이브 기능 함수 ---
 
 def list_files_in_folder(folder_id):
-    service, _, error = get_drive_service()
-    if error: return []
+    service, _, error_msg = get_drive_service()
+    if error_msg:
+        st.error(error_msg) # 에러 발생 시 화면에 출력
+        return []
+    
     try:
         # 폴더 안의 파일만 검색 (삭제된 파일 제외)
         query = f"'{folder_id}' in parents and trashed = false"
@@ -81,12 +90,12 @@ def list_files_in_folder(folder_id):
         ).execute()
         return results.get('files', [])
     except Exception as e:
-        st.error(f"파일 목록을 불러오지 못했습니다. 폴더 공유가 되어 있나요? ({e})")
+        st.error(f"❌ 파일 목록을 불러올 수 없습니다.\n\n원인: {e}\n\n👉 1. 폴더 ID('{folder_id}')가 정확한지 확인하세요.\n👉 2. 봇 이메일이 해당 폴더에 초대되었는지 확인하세요.")
         return []
 
 def download_file_content(file_id):
-    service, _, error = get_drive_service()
-    if error: return None
+    service, _, error_msg = get_drive_service()
+    if error_msg: return None
     try:
         request = service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
@@ -95,11 +104,13 @@ def download_file_content(file_id):
         while done is False:
             status, done = downloader.next_chunk()
         return fh.getvalue()
-    except: return None
+    except Exception as e:
+        st.error(f"파일 다운로드 실패 ({file_id}): {e}")
+        return None
 
 def find_file_id_by_name_part(folder_id, name_part):
-    service, _, error = get_drive_service()
-    if error: return None
+    service, _, error_msg = get_drive_service()
+    if error_msg: return None
     try:
         query = f"'{folder_id}' in parents and name contains '{name_part}' and trashed = false"
         results = service.files().list(q=query, pageSize=1, fields="files(id, name)").execute()
@@ -125,8 +136,13 @@ def login_screen():
 
 def file_manager_drive():
     # 봇 이메일 정보 가져오기
-    _, bot_email, _ = get_drive_service()
+    _, bot_email, error_msg = get_drive_service()
     
+    if error_msg:
+        st.error("⚠️ 인증 시스템 오류")
+        st.code(error_msg)
+        st.stop() # 더 이상 진행하지 않음
+
     st.sidebar.success("✅ 구글 드라이브 연결 성공")
     st.sidebar.markdown("---")
     st.sidebar.caption("아래 이메일을 구글 드라이브 폴더에 '공유'해주세요:")
@@ -134,14 +150,14 @@ def file_manager_drive():
     st.sidebar.info(f"대상 폴더 ID:\n{TARGET_FOLDER_ID}")
 
     st.subheader("☁️ 파일 목록")
-    st.markdown(f"> **폴더:** `{TARGET_FOLDER_ID}`")
+    st.caption(f"Folder: {TARGET_FOLDER_ID}")
 
     with st.spinner("파일 목록을 불러오는 중..."):
         files = list_files_in_folder(TARGET_FOLDER_ID)
     
     if not files:
-        st.warning("폴더에 파일이 없거나, 봇 계정에 공유되지 않았습니다.")
-        st.markdown("👈 왼쪽 사이드바의 **이메일 주소**를 복사해서 폴더에 초대해주세요!")
+        st.warning("표시할 파일이 없습니다.")
+        st.info("체크리스트:\n1. 왼쪽 사이드바의 이메일을 구글 드라이브 폴더에 초대하셨나요?\n2. 코드 상단의 `TARGET_FOLDER_ID`가 실제 존재하는 폴더인가요?")
     else:
         for file in files:
             with st.container():
@@ -157,19 +173,18 @@ def file_manager_drive():
                 
                 with col_action:
                     if 'html' in mime:
-                        if st.button("▶️ 데이터와 함께 실행", key=f"run_{file['id']}"):
+                        if st.button("▶️ 실행", key=f"run_{file['id']}"):
                             st.session_state['preview_id'] = file['id']
                             st.session_state['preview_name'] = file['name']
 
             # --- 미리보기 로직 ---
             if st.session_state.get('preview_id') == file['id']:
                 st.markdown("""<hr style="border-top: 3px solid #4CAF50;">""", unsafe_allow_html=True)
-                st.info(f"🚀 **[{file['name']}] 실행 준비 중...**")
+                st.info(f"🚀 **[{file['name']}] 실행 중...**")
                 
                 html_bytes = download_file_content(file['id'])
                 if not html_bytes:
-                    st.error("❌ HTML 파일 로드 실패")
-                    continue
+                    continue # 위에서 에러 메시지 출력됨
                 
                 # 데이터 주입 (weekly-task-backup 포함된 파일 찾기)
                 target_json_name = 'weekly-task-backup'
@@ -195,13 +210,11 @@ def file_manager_drive():
                         except Exception as e:
                             st.error(f"JSON 데이터 파싱 오류: {e}")
                 else:
-                    st.warning(f"데이터 파일('{target_json_name}')을 찾을 수 없습니다.")
+                    st.warning(f"데이터 파일('{target_json_name}')을 찾을 수 없습니다. (HTML만 실행됨)")
 
                 html_content = html_bytes.decode('utf-8')
-                # 주입된 스크립트 + 원본 HTML
                 final_html = injected_script + html_content
                 
-                st.markdown("⬇️ **미리보기 화면**")
                 components.html(final_html, height=800, scrolling=True)
                 
                 if st.button("닫기", key=f"close_{file['id']}"):
