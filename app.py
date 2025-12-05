@@ -32,9 +32,13 @@ def get_drive_service():
         try:
             key_dict = dict(st.secrets["gcp_service_account"])
             
-            # [안전장치] private_key의 줄바꿈 문자(\n) 처리
+            # [안전장치 1] private_key 줄바꿈 처리
             if "private_key" in key_dict:
                 key_dict["private_key"] = key_dict["private_key"].replace("\\n", "\n")
+            
+            # [안전장치 2] token_uri 누락 시 자동 추가 (이 부분이 에러를 해결합니다)
+            if "token_uri" not in key_dict:
+                key_dict["token_uri"] = "https://oauth2.googleapis.com/token"
 
             creds = service_account.Credentials.from_service_account_info(
                 key_dict, scopes=SCOPES)
@@ -107,19 +111,23 @@ def main_app():
     
     with st.sidebar:
         st.title("Gongyou Cloud")
-        st.success("✅ 서버 연결됨")
-        if st.button("로그아웃"):
-            st.session_state.authenticated = False
-            st.rerun()
         
-        st.divider()
-        st.caption("구글 드라이브 봇 계정:")
-        st.code(bot_email, language="text")
-        st.info("👆 위 이메일을 구글 드라이브 폴더에 '뷰어'로 공유해주세요.")
+        if error:
+            st.error("⚠️ 인증 오류")
+            st.warning(error)
+            # st.stop() # 에러 시 여기서 멈추도록 설정 가능
+        else:
+            st.success("✅ 서버 연결됨")
+            if st.button("로그아웃"):
+                st.session_state.authenticated = False
+                st.rerun()
+            
+            st.divider()
+            st.caption("구글 드라이브 봇 계정:")
+            st.code(bot_email, language="text")
+            st.info("👆 위 이메일을 구글 드라이브 폴더에 '뷰어'로 공유해주세요.")
 
     if error:
-        st.error("⚠️ 인증 시스템 오류")
-        st.warning(error)
         return
 
     st.subheader("📂 파일 브라우저")
