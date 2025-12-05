@@ -12,7 +12,7 @@ import json
 st.set_page_config(page_title="Gongyou Drive", page_icon="☁️", layout="wide")
 
 # ==========================================
-# [설정] 공유 폴더 ID (여기를 수정하세요)
+# [설정] 공유 폴더 ID
 TARGET_FOLDER_ID = "1yp5QvbHIkvSO0OqmwhPW2bsF63ebpU-q"
 # ==========================================
 
@@ -36,7 +36,7 @@ def get_drive_service():
             if "private_key" in key_dict:
                 key_dict["private_key"] = key_dict["private_key"].replace("\\n", "\n")
             
-            # [안전장치 2] token_uri 누락 시 자동 추가 (이 부분이 에러를 해결합니다)
+            # [안전장치 2] token_uri 누락 시 자동 추가
             if "token_uri" not in key_dict:
                 key_dict["token_uri"] = "https://oauth2.googleapis.com/token"
 
@@ -61,7 +61,9 @@ def list_files_in_folder(folder_id):
         st.error(error)
         return []
     try:
-        query = f"'{folder_id}' in parents and trashed = false"
+        # 이름에 'index'가 포함된 파일만 검색
+        query = f"'{folder_id}' in parents and trashed = false and name contains 'index'"
+        
         results = service.files().list(
             q=query, pageSize=100, fields="files(id, name, mimeType)").execute()
         return results.get('files', [])
@@ -95,7 +97,6 @@ def find_data_file(folder_id, name_part):
 # --- 4. 화면 UI ---
 def login():
     st.title("🔒 로그인")
-    # Secrets에 비밀번호가 없으면 0000으로 기본 설정
     admin_pw = st.secrets.get("admin_password", "0000")
     
     pw = st.text_input("비밀번호를 입력하세요", type="password")
@@ -111,33 +112,29 @@ def main_app():
     
     with st.sidebar:
         st.title("Gongyou Cloud")
-        
         if error:
             st.error("⚠️ 인증 오류")
             st.warning(error)
-            # st.stop() # 에러 시 여기서 멈추도록 설정 가능
         else:
             st.success("✅ 서버 연결됨")
             if st.button("로그아웃"):
                 st.session_state.authenticated = False
                 st.rerun()
-            
             st.divider()
-            st.caption("구글 드라이브 봇 계정:")
+            st.caption("봇 계정:")
             st.code(bot_email, language="text")
-            st.info("👆 위 이메일을 구글 드라이브 폴더에 '뷰어'로 공유해주세요.")
 
     if error:
         return
 
-    st.subheader("📂 파일 브라우저")
+    st.subheader("📂 메인 앱 실행")
     
-    with st.spinner("파일 목록을 가져오는 중..."):
+    with st.spinner("Index 파일을 찾는 중..."):
         files = list_files_in_folder(TARGET_FOLDER_ID)
 
     if not files:
-        st.warning("폴더에 표시할 파일이 없습니다.")
-        st.markdown("1. 왼쪽 사이드바의 **봇 이메일**이 폴더에 초대되었는지 확인하세요.\n2. `TARGET_FOLDER_ID`가 올바른지 확인하세요.")
+        st.warning("`index`가 포함된 파일이 없습니다.")
+        st.info(f"폴더 ID: {TARGET_FOLDER_ID} 안에 'index.html' 파일이 있는지 확인하세요.")
     
     for file in files:
         with st.container():
@@ -146,29 +143,53 @@ def main_app():
             col1.markdown(f"### {icon} {file['name']}")
             
             if "html" in file.get('mimeType', ''):
-                if col2.button("실행 ▶️", key=file['id']):
+                if col2.button("앱 실행 ▶️", key=f"btn_{file['id']}"):
                     st.session_state['active_file'] = file
             
             # 실행 화면 표시
             if st.session_state.get('active_file') and st.session_state['active_file']['id'] == file['id']:
-                st.info(f"🚀 **{file['name']}** 실행 중...")
-                html_data = download_file(file['id'])
+                st.success(f"🚀 **{file['name']}** 실행 중...")
                 
-                if html_data:
-                    # 데이터 파일(JSON) 자동 주입 시도
-                    json_file = find_data_file(TARGET_FOLDER_ID, "weekly-task-backup")
-                    script_inject = ""
-                    if json_file:
-                        json_data = download_file(json_file['id'])
-                        if json_data:
-                            try:
-                                json_str = json.dumps(json.loads(json_data.decode('utf-8')))
-                                script_inject = f"<script>window.db_data = {json_str}; console.log('Data Injected');</script>"
-                                st.toast("데이터 연결 성공!")
-                            except: pass
+                # HTML 파일 다운로드
+                html_bytes = download_file(file['id'])
+                
+                if html_bytes:
+                    html_content = html_bytes.decode('utf-8')
+                    final_html = html_content
                     
-                    final_html = script_inject + html_data.decode('utf-8')
-                    components.html(final_html, height=800, scrolling=True)
+                    # 데이터 파일(JSON) 검색 및 주입
+                    json_file = find_data_file(TARGET_FOLDER_ID, "weekly-task-backup")
+                    
+                    if json_file:
+                        json_bytes = download_file(json_file['id'])
+                        if json_bytes:
+                            try:
+                                # [수정] 한글 깨짐 방지 (ensure_ascii=False)
+                                json_data = json.loads(json_bytes.decode('utf-8'))
+                                json_str = json.dumps(json_data, ensure_ascii=False)
+                                
+                                script_inject = f"""
+                                <script>
+                                    window.db_data = {json_str};
+                                    console.log('✅ Streamlit: Data Injected Successfully');
+                                </script>
+                                """
+                                
+                                # [수정] HTML 구조를 깨지 않도록 <head>나 <body> 태그 안쪽에 주입
+                                if "<head>" in html_content:
+                                    final_html = html_content.replace("<head>", "<head>" + script_inject, 1)
+                                elif "<body>" in html_content:
+                                    final_html = html_content.replace("<body>", "<body>" + script_inject, 1)
+                                else:
+                                    # 태그가 없으면 어쩔 수 없이 앞에 붙임
+                                    final_html = script_inject + html_content
+                                    
+                                st.toast(f"데이터 연결됨: {json_file['name']}")
+                            except Exception as e:
+                                st.error(f"데이터 주입 실패: {e}")
+                    
+                    # 렌더링 (높이 넉넉하게 설정)
+                    components.html(final_html, height=1000, scrolling=True)
                     
                     if st.button("닫기 ❌", key=f"close_{file['id']}"):
                         del st.session_state['active_file']
