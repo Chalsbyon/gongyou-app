@@ -1,147 +1,69 @@
 import streamlit as st
-import os
-import json
-import io
 import sys
 
-# --- 1. 안전한 시작 및 라이브러리 검사 ---
-st.set_page_config(page_title="Gongyou Drive", page_icon="☁️", layout="wide")
+# --- 시스템 진단 모드 ---
+st.set_page_config(page_title="시스템 진단", page_icon="🛠")
 
+st.title("🛠 Gongyou 시스템 진단 모드")
+st.markdown("앱이 실행되지 않는 원인을 찾고 있습니다...")
+
+# 1. 라이브러리 설치 확인
+st.subheader("1. 라이브러리 설치 상태")
 try:
     import pandas as pd
-    import streamlit.components.v1 as components
-    from google.oauth2 import service_account
+    st.success("✅ Pandas 라이브러리: 정상")
+except ImportError:
+    st.error("❌ Pandas 설치 실패 (requirements.txt 확인 필요)")
+
+try:
+    import google.oauth2
+    import googleapiclient
     from googleapiclient.discovery import build
-    from googleapiclient.http import MediaIoBaseDownload
-except ImportError as e:
-    st.error("🚨 **치명적인 오류: 필수 라이브러리를 찾을 수 없습니다.**")
-    st.warning(f"누락된 라이브러리: {e}")
-    st.info("GitHub의 `requirements.txt` 파일에 오타가 있거나, 설치가 덜 된 상태입니다.")
-    st.stop()
+    st.success("✅ Google 연동 라이브러리: 정상")
+except ImportError:
+    st.error("❌ Google 라이브러리 설치 실패 (requirements.txt 확인 필요)")
 
-# ==========================================
-# [설정] 사용자 정보
-# ==========================================
-TARGET_FOLDER_ID = "1yp5QvbHIkvSO0OqmwhPW2bsF63ebpU-q"
-# ==========================================
 
-# --- 2. 인증 함수 (예외 처리 강화) ---
-@st.cache_resource
-def get_drive_service():
-    # 읽기 전용 권한
-    SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
-    creds = None
-    bot_email = "알 수 없음"
-
-    # A. Streamlit Cloud Secrets 확인
-    if "gcp_service_account" in st.secrets:
-        try:
-            # Secrets 데이터를 딕셔너리로 변환
-            key_dict = dict(st.secrets["gcp_service_account"])
-            
-            # 줄바꿈 문자(\n)가 문자열로 잘못 들어간 경우 수정
-            if "private_key" in key_dict:
-                key_dict["private_key"] = key_dict["private_key"].replace("\\n", "\n")
-
-            creds = service_account.Credentials.from_service_account_info(
-                key_dict, scopes=SCOPES)
-            bot_email = key_dict.get('client_email', '알 수 없음')
-        except Exception as e:
-            return None, None, f"Secrets 키 파싱 오류: {e}"
-
-    # B. 로컬 파일 확인 (보조 수단)
-    elif os.path.exists('gong_key.json'):
-        try:
-            creds = service_account.Credentials.from_service_account_file(
-                'gong_key.json', scopes=SCOPES)
-            bot_email = creds.service_account_email
-        except Exception as e:
-            return None, None, f"로컬 파일 오류: {e}"
-    
+# 2. Secrets(비밀키) 형식 확인
+st.subheader("2. Secrets(비밀키) 상태")
+try:
+    if "gcp_service_account" not in st.secrets:
+        st.error("❌ Secrets에 `[gcp_service_account]` 섹션이 없습니다.")
+        st.info("Streamlit Cloud 설정의 Secrets 탭을 확인해주세요.")
     else:
-        return None, None, "인증 정보를 찾을 수 없습니다. (Secrets 설정을 확인하세요)"
+        st.success("✅ `[gcp_service_account]` 섹션 발견됨")
+        
+        # 키 내용 검사 (내용은 보여주지 않음)
+        key_data = st.secrets["gcp_service_account"]
+        
+        if "type" in key_data and key_data["type"] == "service_account":
+            st.success("✅ type: service_account 확인됨")
+        else:
+            st.warning("⚠️ type 항목이 없거나 service_account가 아닙니다.")
 
-    # C. 서비스 연결
-    try:
-        service = build('drive', 'v3', credentials=creds)
-        return service, bot_email, None
-    except Exception as e:
-        return None, None, f"구글 API 연결 실패: {e}"
-
-# --- 3. 기능 함수들 ---
-def list_files_in_folder(folder_id):
-    service, _, error = get_drive_service()
-    if error:
-        st.error(f"❌ {error}")
-        return []
-    try:
-        query = f"'{folder_id}' in parents and trashed = false"
-        results = service.files().list(
-            q=query, pageSize=50, fields="files(id, name, mimeType)").execute()
-        return results.get('files', [])
-    except Exception as e:
-        st.error(f"폴더 접근 실패: {e}")
-        return []
-
-def download_file_content(file_id):
-    service, _, _ = get_drive_service()
-    if not service: return None
-    try:
-        request = service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while done is False:
-            status, done = downloader.next_chunk()
-        return fh.getvalue()
-    except: return None
-
-# --- 4. 화면 구성 ---
-if 'pin' not in st.session_state:
-    st.session_state.pin = st.secrets.get("admin_password", "0000")
-if 'authenticated' not in st.session_state:
-    st.session_state.authenticated = False
-
-def main():
-    if not st.session_state.authenticated:
-        st.title("🔒 로그인")
-        pw = st.text_input("비밀번호", type="password")
-        if st.button("접속"):
-            if pw == st.session_state.pin:
-                st.session_state.authenticated = True
-                st.rerun()
+        if "private_key" in key_data:
+            pk = key_data["private_key"]
+            if "-----BEGIN PRIVATE KEY-----" in pk:
+                st.success("✅ private_key 헤더 확인됨")
+                
+                # 줄바꿈 문자 확인
+                if "\\n" in pk:
+                    st.warning("⚠️ private_key에 문자열 `\\n`이 포함되어 있습니다. (자동 수정 가능)")
+                elif "\n" in pk:
+                    st.success("✅ private_key 줄바꿈 정상")
             else:
-                st.error("비밀번호가 틀렸습니다.")
-        return
+                st.error("❌ private_key 형식이 올바르지 않습니다. (`-----BEGIN...` 으로 시작해야 함)")
+        else:
+            st.error("❌ private_key 항목이 없습니다.")
 
-    # 로그인 후 화면
-    st.sidebar.title("Gongyou Drive")
-    if st.button("로그아웃"):
-        st.session_state.authenticated = False
-        st.rerun()
+        if "client_email" in key_data:
+            st.success(f"✅ 봇 이메일 확인됨: `{key_data['client_email']}`")
+        else:
+            st.error("❌ client_email 항목이 없습니다.")
 
-    service, bot_email, error = get_drive_service()
-    if error:
-        st.error("⚠️ 인증 오류 발생")
-        st.code(error)
-        st.info("Streamlit Cloud 설정의 'Secrets' 형식을 다시 확인해주세요.")
-    else:
-        st.sidebar.success("연결됨")
-        st.sidebar.code(bot_email)
-        
-        st.subheader(f"폴더 내용 ({TARGET_FOLDER_ID})")
-        files = list_files_in_folder(TARGET_FOLDER_ID)
-        
-        if not files:
-            st.warning("파일이 없습니다.")
-        
-        for file in files:
-            col1, col2 = st.columns([4, 1])
-            col1.write(f"📄 {file['name']}")
-            if col2.button("실행", key=file['id']):
-                content = download_file_content(file['id'])
-                if content:
-                    components.html(content.decode('utf-8'), height=800, scrolling=True)
+except Exception as e:
+    st.error(f"❌ Secrets를 읽는 중 치명적인 오류 발생: {e}")
+    st.markdown("Secrets 형식이 TOML이 아닌 JSON으로 되어 있을 가능성이 높습니다.")
 
-if __name__ == "__main__":
-    main()
+st.divider()
+st.info("위 진단 내용을 확인한 후, 문제가 없다면 다시 원래 코드로 복구해 주세요.")
